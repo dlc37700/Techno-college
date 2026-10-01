@@ -28,6 +28,36 @@ function previewFile(key) {
   const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); return new TextDecoder("utf-8").decode(bytes);
 }
 
+// ─── TÉLÉCHARGEMENT ZIP (PDF / ODT / DOCX) ────────────────
+// Un ZIP par séquence ({id}.zip) dans le bucket privé "ressources" de Supabase,
+// organisé en {id}/PDF, {id}/ODT, {id}/DOCX. Lecture réservée aux comptes connectés.
+const ZIP_FORMATS={pdf:{l:"PDF",dir:"PDF"},docx:{l:"Word (DOCX)",dir:"DOCX"},odt:{l:"OpenDocument (ODT)",dir:"ODT"},all:{l:"Les 3 formats"}};
+async function fetchSeqZip(id){
+  const{data,error}=await supabase.storage.from("ressources").download(id+".zip");
+  if(error||!data)throw new Error(`Les fichiers de « ${id} » ne sont pas encore disponibles.`);
+  return data;
+}
+function saveBlob(blob,name){
+  const url=URL.createObjectURL(blob);const a=document.createElement("a");
+  a.href=url;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function downloadZip(ids,fmt,name,onProgress){
+  if(ids.length===1&&fmt==="all"){saveBlob(await fetchSeqZip(ids[0]),name);return;}
+  const{default:JSZip}=await import("jszip");
+  const out=new JSZip();
+  for(let i=0;i<ids.length;i++){
+    onProgress?.(i+1,ids.length);
+    const zip=await JSZip.loadAsync(await fetchSeqZip(ids[i]));
+    for(const[path,entry]of Object.entries(zip.files)){
+      if(entry.dir)continue;
+      if(fmt!=="all"&&!path.split("/").includes(ZIP_FORMATS[fmt].dir))continue;
+      out.file(path,await entry.async("uint8array"));
+    }
+  }
+  saveBlob(await out.generateAsync({type:"blob",compression:"STORE"}),name);
+}
+
 // Expand metadata
 const SEQUENCES = _M.map(m => ({
   id: m[0], niveau: m[1], titre: m[2], description: m[3], nbFiles: m[4],
@@ -88,6 +118,55 @@ function FilePreview({fileKey,filename,onClose}){
   );
 }
 
+// ─── BOUTON TÉLÉCHARGER EN ZIP ────────────────────────────
+function ZipDownload({ids,name,user,onNeedAuth,label="Télécharger en ZIP",center}){
+  const[fmt,sF]=useState("pdf");const[busy,sB]=useState(false);const[prog,sP]=useState("");const[err,sE]=useState("");
+  const go=async()=>{
+    if(!user){onNeedAuth();return;}
+    sE("");sB(true);sP("Préparation…");
+    try{await downloadZip(ids,fmt,`${name}-${fmt==="all"?"pdf-odt-docx":fmt}.zip`,(i,n)=>sP(n>1?`Séquence ${i}/${n}…`:"Préparation…"));}
+    catch(e){sE(e.message||"Téléchargement impossible.");}
+    sB(false);sP("");
+  };
+  return <div style={{display:"inline-flex",flexDirection:"column",gap:6,alignItems:center?"center":"flex-start"}}>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",justifyContent:center?"center":"flex-start"}}>
+      {user&&<select value={fmt} onChange={e=>sF(e.target.value)} disabled={busy} style={{padding:"9px 12px",borderRadius:T.rs,border:`1.5px solid ${T.border}`,background:T.white,color:T.text,fontSize:13,fontWeight:600,fontFamily:"'DM Sans',sans-serif",cursor:"pointer"}}>
+        {Object.entries(ZIP_FORMATS).map(([k,v])=><option key={k} value={k}>{v.l}</option>)}
+      </select>}
+      <Btn onClick={go} disabled={busy}>{busy?`⏳ ${prog}`:user?`📦 ${label}`:`🔒 ${label}`}</Btn>
+    </div>
+    {!user&&<span style={{fontSize:11,color:T.dim}}>Connexion requise pour télécharger</span>}
+    {err&&<span style={{fontSize:12,color:T.red,fontWeight:600}}>{err}</span>}
+  </div>;
+}
+
+// ─── ADMIN : ENVOI DES ZIP VERS LE STOCKAGE ───────────────
+function ResourceUploader(){
+  const[present,sPresent]=useState(null);const[log,sLog]=useState([]);const[busy,sB]=useState(false);
+  const refresh=async()=>{
+    const{data}=await supabase.storage.from("ressources").list("",{limit:200});
+    sPresent(new Set((data||[]).map(f=>f.name)));
+  };
+  useEffect(()=>{refresh()},[]);
+  const onFiles=async fl=>{
+    sB(true);sLog([]);
+    for(const f of fl){
+      if(!f.name.endsWith(".zip")){sLog(l=>[...l,`⚠️ ${f.name} ignoré (pas un .zip)`]);continue;}
+      const{error}=await supabase.storage.from("ressources").upload(f.name,f,{upsert:true,contentType:"application/zip"});
+      sLog(l=>[...l,error?`❌ ${f.name} : ${error.message}`:`✅ ${f.name}`]);
+    }
+    sB(false);refresh();
+  };
+  const missing=present?SEQUENCES.filter(s=>!present.has(s.id+".zip")):[];
+  return <div style={{display:"flex",flexDirection:"column",gap:12}}>
+    <p style={{fontSize:13,color:T.sec,lineHeight:1.6}}>Envoyez ici les ZIP des séquences (un fichier <code>{"{id-séquence}"}.zip</code> par séquence). Ils ne sont téléchargeables que par les comptes connectés.</p>
+    {present&&<div style={{fontSize:13,fontWeight:700,color:missing.length?T.amber:T.green}}>{SEQUENCES.length-missing.length} / {SEQUENCES.length} séquences disponibles{missing.length>0&&<span style={{fontWeight:500,color:T.dim}}> · manquantes : {missing.map(s=>s.id).join(", ")}</span>}</div>}
+    <input type="file" accept=".zip" multiple disabled={busy} onChange={e=>{if(e.target.files.length)onFiles(Array.from(e.target.files));e.target.value=""}}/>
+    {busy&&<p style={{fontSize:13,color:T.dim}}>Envoi en cours…</p>}
+    <div style={{display:"flex",flexDirection:"column",gap:4,fontSize:12,maxHeight:"30vh",overflowY:"auto"}}>{log.map((l,i)=><div key={i}>{l}</div>)}</div>
+  </div>;
+}
+
 // ─── AI ASSISTANT ─────────────────────────────────────────
 function AIChat({sequence}){
   const[msgs,sM]=useState([{role:"assistant",text:`Bonjour ! 🤖 Assistant TechnoCollège.\n\n${sequence?`Séquence : "${sequence.titre}"`:"Technologie cycle 4."}\n\nJe génère fiches, exercices, quiz, explications. Que puis-je faire ?`}]);
@@ -115,7 +194,8 @@ function SeqDetail({seq,onClose,user,onNeedAuth}){
         <button onClick={onClose} style={{background:T.card,border:`1.5px solid ${T.border}`,color:T.text,padding:"8px 16px",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"'DM Sans',sans-serif",marginBottom:16,boxShadow:T.sh}}>← Retour</button>
         <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}><Badge color={c} bg={bg}>{seq.niveau}</Badge><Badge color={T.dim} bg={T.input}>📄 {seq.nbFiles} documents</Badge></div>
         <h1 style={{fontSize:22,fontWeight:800,lineHeight:1.3,marginBottom:10,fontFamily:"'Sora',sans-serif"}}>{seq.titre}</h1>
-        <p style={{color:T.sec,fontSize:14,lineHeight:1.6,maxWidth:650}}>{seq.description}</p>
+        <p style={{color:T.sec,fontSize:14,lineHeight:1.6,maxWidth:650,marginBottom:seq.userCreated?0:16}}>{seq.description}</p>
+        {!seq.userCreated&&<ZipDownload ids={[seq.id]} name={seq.id} user={user} onNeedAuth={onNeedAuth} label="Télécharger la séquence en ZIP"/>}
       </div>
 
       <div style={{display:"flex",gap:2,padding:"0 24px",borderBottom:`1px solid ${T.border}`,background:T.card,position:"sticky",top:0,zIndex:10,overflowX:"auto"}}>
@@ -153,7 +233,7 @@ function SeqDetail({seq,onClose,user,onNeedAuth}){
           <p style={{fontSize:14,color:T.sec,marginBottom:20,maxWidth:420,margin:"0 auto 20px",lineHeight:1.6}}>Connectez-vous pour consulter et télécharger les ressources pédagogiques de cette séquence.</p>
           <Btn onClick={onNeedAuth}>🔑 Se connecter</Btn>
         </div>:<div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <p style={{fontSize:13,color:T.dim,marginBottom:8}}>Cliquez pour <strong style={{color:T.green}}>prévisualiser</strong> puis télécharger. Tous les documents sont des fichiers HTML imprimables.</p>
+          <p style={{fontSize:13,color:T.dim,marginBottom:8}}>Cliquez pour <strong style={{color:T.green}}>prévisualiser</strong> un document. Pour les récupérer en PDF (impression) ou en ODT / DOCX (modifiables), utilisez le bouton « Télécharger la séquence en ZIP » en haut de la page.</p>
           {seq.resources.map((r,i)=>(
             <div key={i} onClick={()=>sPr(r)} style={{padding:"14px 16px",borderRadius:T.rs,background:T.card,border:`1.5px solid ${T.border}`,display:"flex",alignItems:"center",gap:12,cursor:"pointer",boxShadow:T.sh,transition:"all .2s"}}
               onMouseEnter={e=>{e.currentTarget.style.borderColor=c;e.currentTarget.style.boxShadow=T.shH;e.currentTarget.style.transform="translateY(-2px)"}}
@@ -458,6 +538,7 @@ function AdminPanel({allSeqs,userSeqs,onDeleteSeq,onApproveSeq,currentUser}){
         <button onClick={()=>sT("users")} style={tabStyle(tab==="users")}>👥 Utilisateurs ({users.length})</button>
         <button onClick={()=>sT("comments")} style={tabStyle(tab==="comments")}>💬 Commentaires ({comments.length})</button>
         <button onClick={()=>sT("seqs")} style={tabStyle(tab==="seqs")}>📦 Séquences publiées ({publishedSeqs.length})</button>
+        <button onClick={()=>sT("zips")} style={tabStyle(tab==="zips")}>📥 Fichiers ZIP</button>
       </div>
 
       {tab==="pending"&&<div style={{display:"flex",flexDirection:"column",gap:10,maxHeight:"58vh",overflowY:"auto"}}>
@@ -526,6 +607,8 @@ function AdminPanel({allSeqs,userSeqs,onDeleteSeq,onApproveSeq,currentUser}){
             </div>
           ))}
       </div>}
+
+      {tab==="zips"&&<ResourceUploader/>}
 
       {tab==="seqs"&&<div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"58vh",overflowY:"auto"}}>
         {publishedSeqs.length===0?<p style={{color:T.dim,textAlign:"center",padding:24}}>Aucune séquence publiée approuvée.</p>:
@@ -632,6 +715,7 @@ export default function App(){
             <Btn v="secondary" onClick={()=>sAI(true)}>🤖 Assistant IA</Btn>
             {user&&<Btn v="secondary" onClick={()=>sPub(true)}>＋ Publier</Btn>}
           </div>
+          <div style={{marginTop:18}}><ZipDownload ids={SEQUENCES.map(s=>s.id)} name="technocollege-toutes-les-ressources" user={user} onNeedAuth={()=>sAuth(true)} label="Télécharger toutes les ressources en ZIP" center/></div>
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:12,maxWidth:600,margin:"0 auto 36px"}}>
