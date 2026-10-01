@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabase";
 
 /* ═══════════════════════════════════════════════════════════
    TechnoCollège — 21 séquences clé en main · 256 fichiers
@@ -38,14 +39,6 @@ const SEQUENCES = _M.map(m => ({
 }));
 
 
-// ─── STORAGE ──────────────────────────────────────────────
-const ST={
-  async get(k){try{const r=await window.storage.get(k);return r?JSON.parse(r.value):null}catch{return null}},
-  async set(k,v){try{await window.storage.set(k,JSON.stringify(v))}catch{}},
-  async gS(k){try{const r=await window.storage.get(k,true);return r?JSON.parse(r.value):null}catch{return null}},
-  async sS(k,v){try{await window.storage.set(k,JSON.stringify(v),true)}catch{}},
-};
-
 // ─── THEME ────────────────────────────────────────────────
 const T={bg:"#f0f4f8",card:"#ffffff",input:"#f1f5f9",border:"#e2e8f0",borderH:"#cbd5e1",text:"#1e293b",sec:"#475569",dim:"#94a3b8",white:"#fff",
 green:"#10b981",greenBg:"#ecfdf5",greenB:"#a7f3d0",purple:"#7c3aed",purpleBg:"#f5f3ff",purpleB:"#c4b5fd",amber:"#f59e0b",amberBg:"#fffbeb",amberB:"#fcd34d",
@@ -65,9 +58,10 @@ const css=`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@40
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`;
 
 // ─── AUTH / ADMIN CONFIG ──────────────────────────────────
-// Modifiez cette liste pour ajouter/retirer des administrateurs.
-const ADMIN_EMAILS=["hamed.bounedjar.prof@gmail.com"];
-const isAdmin=u=>!!u&&ADMIN_EMAILS.includes(u.email);
+// Le rôle vient de la table `profiles` (Supabase). Pour nommer un admin :
+// update public.profiles set role='admin' where email='...';
+const isAdmin=u=>!!u&&u.role==="admin";
+const seqFromRow=r=>({...r.data,id:r.id,status:r.status,publishedAt:r.created_at?Date.parse(r.created_at):undefined,authorId:r.author_id});
 
 // ─── COMPONENTS ───────────────────────────────────────────
 function Badge({children,color=T.green,bg:b}){return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"4px 12px",borderRadius:20,fontSize:11,fontWeight:700,background:b||color+"14",color,letterSpacing:.3}}>{children}</span>}
@@ -200,58 +194,104 @@ function SeqDetail({seq,onClose,user,onNeedAuth}){
 // ─── MAIN APP ─────────────────────────────────────────────
 // ─── AUTH / LIKES / COMMENTS / PUBLISH ────────────────────
 
-function AuthModal({open,onClose,onLogin}){
-  const[mode,sM]=useState("login");const[form,sF]=useState({name:"",email:"",pass:""});const[err,sE]=useState("");
+function AuthModal({open,onClose}){
+  const[mode,sM]=useState("login");const[form,sF]=useState({name:"",email:"",pass:""});const[err,sE]=useState("");const[info,sI]=useState("");const[busy,sB]=useState(false);
   const is={width:"100%",padding:"10px 14px",borderRadius:T.rs,border:`1.5px solid ${T.border}`,background:T.input,color:T.text,fontSize:14,fontFamily:"'DM Sans',sans-serif",outline:"none",boxSizing:"border-box"};
   const submit=async()=>{
-    if(!form.email||!form.pass){sE("Remplissez tous les champs");return;}
-    const users=await ST.gS("tc-users")||{};
+    sE("");sI("");
+    const email=form.email.trim();
+    if(mode==="reset"){
+      if(!email){sE("Entrez votre email");return;}
+      sB(true);
+      const{error}=await supabase.auth.resetPasswordForEmail(email,{redirectTo:window.location.origin});
+      sB(false);
+      if(error){sE(error.message);return;}
+      sI("Si un compte existe pour cet email, un lien de réinitialisation vient d'être envoyé.");return;
+    }
+    if(!email||!form.pass){sE("Remplissez tous les champs");return;}
     if(mode==="signup"){
-      if(!form.name){sE("Entrez votre nom");return;}
-      if(users[form.email]){sE("Email déjà utilisé");return;}
-      users[form.email]={name:form.name,pass:form.pass,joined:Date.now()};
-      await ST.sS("tc-users",users);
-      onLogin({email:form.email,name:form.name});onClose();
+      if(!form.name.trim()){sE("Entrez votre nom");return;}
+      if(form.pass.length<6){sE("Le mot de passe doit faire au moins 6 caractères");return;}
+      sB(true);
+      const{data,error}=await supabase.auth.signUp({email,password:form.pass,options:{data:{name:form.name.trim()},emailRedirectTo:window.location.origin}});
+      sB(false);
+      if(error){sE(error.message);return;}
+      if(!data.session){sI("Compte créé ! Cliquez sur le lien de confirmation envoyé par email, puis connectez-vous.");sM("login");return;}
+      onClose();
     } else {
-      const u=users[form.email];
-      if(!u||u.pass!==form.pass){sE("Email ou mot de passe incorrect");return;}
-      onLogin({email:form.email,name:u.name});onClose();
+      sB(true);
+      const{error}=await supabase.auth.signInWithPassword({email,password:form.pass});
+      sB(false);
+      if(error){sE("Email ou mot de passe incorrect");return;}
+      onClose();
     }
   };
   if(!open)return null;
-  return <Modal open={open} onClose={onClose} title={mode==="login"?"Connexion":"Créer un compte"}>
+  return <Modal open={open} onClose={onClose} title={mode==="login"?"Connexion":mode==="signup"?"Créer un compte":"Mot de passe oublié"}>
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       {mode==="signup"&&<div><label style={{fontSize:13,fontWeight:700,display:"block",marginBottom:6,color:T.sec}}>Nom</label><input value={form.name} onChange={e=>sF(f=>({...f,name:e.target.value}))} placeholder="Votre nom" style={is}/></div>}
       <div><label style={{fontSize:13,fontWeight:700,display:"block",marginBottom:6,color:T.sec}}>Email</label><input value={form.email} onChange={e=>sF(f=>({...f,email:e.target.value}))} placeholder="email@exemple.fr" style={is}/></div>
-      <div><label style={{fontSize:13,fontWeight:700,display:"block",marginBottom:6,color:T.sec}}>Mot de passe</label><input type="password" value={form.pass} onChange={e=>sF(f=>({...f,pass:e.target.value}))} placeholder="••••••" style={is} onKeyDown={e=>e.key==="Enter"&&submit()}/></div>
+      {mode!=="reset"&&<div><label style={{fontSize:13,fontWeight:700,display:"block",marginBottom:6,color:T.sec}}>Mot de passe</label><input type="password" value={form.pass} onChange={e=>sF(f=>({...f,pass:e.target.value}))} placeholder="••••••" style={is} onKeyDown={e=>e.key==="Enter"&&submit()}/></div>}
       {err&&<p style={{fontSize:13,color:T.red,fontWeight:600}}>{err}</p>}
-      <Btn onClick={submit}>{mode==="login"?"Se connecter":"Créer le compte"}</Btn>
-      <p style={{fontSize:13,color:T.dim,textAlign:"center",cursor:"pointer"}} onClick={()=>{sM(mode==="login"?"signup":"login");sE("")}}>
-        {mode==="login"?"Pas de compte ? Créer un compte":"Déjà un compte ? Se connecter"}
+      {info&&<p style={{fontSize:13,color:T.green,fontWeight:600}}>{info}</p>}
+      <Btn onClick={submit} disabled={busy}>{mode==="login"?"Se connecter":mode==="signup"?"Créer le compte":"Envoyer le lien"}</Btn>
+      {mode==="login"&&<p style={{fontSize:13,color:T.dim,textAlign:"center",cursor:"pointer"}} onClick={()=>{sM("reset");sE("");sI("")}}>Mot de passe oublié ?</p>}
+      <p style={{fontSize:13,color:T.dim,textAlign:"center",cursor:"pointer"}} onClick={()=>{sM(mode==="signup"?"login":mode==="login"?"signup":"login");sE("");sI("")}}>
+        {mode==="login"?"Pas de compte ? Créer un compte":mode==="signup"?"Déjà un compte ? Se connecter":"Retour à la connexion"}
       </p>
     </div>
   </Modal>;
 }
 
+function NewPasswordModal({open,onClose}){
+  const[pass,sP]=useState("");const[err,sE]=useState("");const[done,sD]=useState(false);
+  const submit=async()=>{
+    if(pass.length<6){sE("Le mot de passe doit faire au moins 6 caractères");return;}
+    const{error}=await supabase.auth.updateUser({password:pass});
+    if(error){sE(error.message);return;}
+    sD(true);
+  };
+  if(!open)return null;
+  return <Modal open={open} onClose={onClose} title="Nouveau mot de passe">
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {done?<><p style={{fontSize:14,color:T.green,fontWeight:600}}>Mot de passe mis à jour. Vous êtes connecté.</p><Btn onClick={onClose}>Fermer</Btn></>:<>
+        <input type="password" value={pass} onChange={e=>sP(e.target.value)} placeholder="Nouveau mot de passe" style={{width:"100%",padding:"10px 14px",borderRadius:T.rs,border:`1.5px solid ${T.border}`,background:T.input,color:T.text,fontSize:14,fontFamily:"'DM Sans',sans-serif",outline:"none",boxSizing:"border-box"}} onKeyDown={e=>e.key==="Enter"&&submit()}/>
+        {err&&<p style={{fontSize:13,color:T.red,fontWeight:600}}>{err}</p>}
+        <Btn onClick={submit}>Enregistrer</Btn></>}
+    </div>
+  </Modal>;
+}
+
 function LikesComments({seqId,user,onNeedAuth}){
-  const[likes,sL]=useState({});const[comments,sC]=useState([]);const[txt,sT]=useState("");const[loaded,sLd]=useState(false);
+  const[likes,sL]=useState([]);const[comments,sC]=useState([]);const[txt,sT]=useState("");const[loaded,sLd]=useState(false);
   useEffect(()=>{(async()=>{
-    const l=await ST.gS("tc-likes-"+seqId)||{};sL(l);
-    const c=await ST.gS("tc-comments-"+seqId)||[];sC(c);sLd(true);
+    const[l,c]=await Promise.all([
+      supabase.from("likes").select("user_id").eq("seq_id",String(seqId)),
+      supabase.from("comments").select("id,author_name,text,created_at").eq("seq_id",String(seqId)).order("created_at"),
+    ]);
+    sL((l.data||[]).map(x=>x.user_id));
+    sC((c.data||[]).map(x=>({id:x.id,author:x.author_name,text:x.text,date:Date.parse(x.created_at)})));
+    sLd(true);
   })()},[seqId]);
   const toggleLike=async()=>{
     if(!user){onNeedAuth();return;}
-    const nl={...likes};if(nl[user.email])delete nl[user.email];else nl[user.email]=true;
-    sL(nl);await ST.sS("tc-likes-"+seqId,nl);
+    if(likes.includes(user.id)){
+      sL(l=>l.filter(id=>id!==user.id));
+      await supabase.from("likes").delete().eq("seq_id",String(seqId)).eq("user_id",user.id);
+    }else{
+      sL(l=>[...l,user.id]);
+      await supabase.from("likes").insert({seq_id:String(seqId),user_id:user.id});
+    }
   };
   const addComment=async()=>{
     if(!user){onNeedAuth();return;}
     if(!txt.trim())return;
-    const nc=[...comments,{author:user.name,email:user.email,text:txt.trim(),date:Date.now()}];
-    sC(nc);sT("");await ST.sS("tc-comments-"+seqId,nc);
+    const{data,error}=await supabase.from("comments").insert({seq_id:String(seqId),user_id:user.id,author_name:user.name,text:txt.trim()}).select("id,author_name,text,created_at").single();
+    if(error){alert("Impossible d'envoyer le commentaire : "+error.message);return;}
+    sC(c=>[...c,{id:data.id,author:data.author_name,text:data.text,date:Date.parse(data.created_at)}]);sT("");
   };
-  const likeCount=Object.keys(likes).length;
-  const liked=user&&likes[user.email];
+  const likeCount=likes.length;
+  const liked=!!user&&likes.includes(user.id);
   if(!loaded)return null;
   return (
     <div style={{borderTop:`1px solid ${T.border}`,paddingTop:16,marginTop:16}}>
@@ -264,7 +304,7 @@ function LikesComments({seqId,user,onNeedAuth}){
       </div>
       {comments.length>0&&<div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:14}}>
         {comments.map((c,i)=>(
-          <div key={i} style={{background:T.input,borderRadius:T.rs,padding:"10px 14px",border:`1px solid ${T.border}`}}>
+          <div key={c.id??i} style={{background:T.input,borderRadius:T.rs,padding:"10px 14px",border:`1px solid ${T.border}`}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
               <span style={{fontSize:13,fontWeight:700,color:T.text}}>{c.author}</span>
               <span style={{fontSize:11,color:T.dim}}>{new Date(c.date).toLocaleDateString("fr-FR")}</span>
@@ -376,33 +416,32 @@ function AdminPanel({allSeqs,userSeqs,onDeleteSeq,onApproveSeq,currentUser}){
   const pendingSeqs=userSeqs.filter(s=>s.status==="pending");
   const publishedSeqs=userSeqs.filter(s=>!s.status||s.status==="approved");
   const[tab,sT]=useState(pendingSeqs.length>0?"pending":"users");
-  const[users,sUsers]=useState({});
+  const[users,sUsers]=useState([]);
   const[comments,sComments]=useState([]);
   const[loaded,sLd]=useState(false);
   const loadAll=async()=>{
-    const u=await ST.gS("tc-users")||{};
-    sUsers(u);
-    const all=[];
-    for(const s of allSeqs){
-      const c=await ST.gS("tc-comments-"+s.id)||[];
-      c.forEach((com,idx)=>all.push({...com,seqId:s.id,seqTitre:s.titre,idx}));
-    }
-    sComments(all.sort((a,b)=>(b.date||0)-(a.date||0)));
+    const[u,c]=await Promise.all([
+      supabase.from("profiles").select("id,email,name,role,created_at").order("created_at"),
+      supabase.from("comments").select("id,seq_id,user_id,author_name,text,created_at").order("created_at",{ascending:false}),
+    ]);
+    const profs=u.data||[];sUsers(profs);
+    const titles=Object.fromEntries(allSeqs.map(s=>[String(s.id),s.titre]));
+    const emails=Object.fromEntries(profs.map(p=>[p.id,p.email]));
+    sComments((c.data||[]).map(x=>({id:x.id,author:x.author_name,email:emails[x.user_id]||"",text:x.text,date:Date.parse(x.created_at),seqId:x.seq_id,seqTitre:titles[x.seq_id]||x.seq_id})));
     sLd(true);
   };
   useEffect(()=>{loadAll()},[]);
-  const deleteUser=async email=>{
-    if(email===currentUser?.email){alert("Vous ne pouvez pas supprimer votre propre compte.");return;}
-    if(isAdmin({email})){alert("Impossible de supprimer un administrateur.");return;}
-    if(!confirm(`Supprimer l'utilisateur ${email} ?`))return;
-    const nu={...users};delete nu[email];
-    await ST.sS("tc-users",nu);sUsers(nu);
+  const deleteUser=async p=>{
+    if(p.id===currentUser?.id){alert("Vous ne pouvez pas supprimer votre propre compte.");return;}
+    if(p.role==="admin"){alert("Impossible de supprimer un administrateur.");return;}
+    if(!confirm(`Supprimer l'utilisateur ${p.email} ?`))return;
+    const{error}=await supabase.rpc("admin_delete_user",{target:p.id});
+    if(error){alert("Erreur : "+error.message);return;}
+    sUsers(us=>us.filter(x=>x.id!==p.id));
   };
-  const deleteComment=async(seqId,idx)=>{
+  const deleteComment=async id=>{
     if(!confirm("Supprimer ce commentaire ?"))return;
-    const c=await ST.gS("tc-comments-"+seqId)||[];
-    c.splice(idx,1);
-    await ST.sS("tc-comments-"+seqId,c);
+    await supabase.from("comments").delete().eq("id",id);
     loadAll();
   };
   const deleteSeq=async(id,titre)=>{
@@ -416,7 +455,7 @@ function AdminPanel({allSeqs,userSeqs,onDeleteSeq,onApproveSeq,currentUser}){
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"flex",gap:4,borderBottom:`1px solid ${T.border}`,paddingBottom:10,flexWrap:"wrap"}}>
         <button onClick={()=>sT("pending")} style={{...tabStyle(tab==="pending"),position:"relative"}}>⏳ À valider {pendingSeqs.length>0&&<span style={{marginLeft:4,fontSize:10,padding:"1px 7px",borderRadius:10,background:T.red,color:T.white,fontWeight:800}}>{pendingSeqs.length}</span>}</button>
-        <button onClick={()=>sT("users")} style={tabStyle(tab==="users")}>👥 Utilisateurs ({Object.keys(users).length})</button>
+        <button onClick={()=>sT("users")} style={tabStyle(tab==="users")}>👥 Utilisateurs ({users.length})</button>
         <button onClick={()=>sT("comments")} style={tabStyle(tab==="comments")}>💬 Commentaires ({comments.length})</button>
         <button onClick={()=>sT("seqs")} style={tabStyle(tab==="seqs")}>📦 Séquences publiées ({publishedSeqs.length})</button>
       </div>
@@ -456,25 +495,25 @@ function AdminPanel({allSeqs,userSeqs,onDeleteSeq,onApproveSeq,currentUser}){
       </div>}
 
       {tab==="users"&&<div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"58vh",overflowY:"auto"}}>
-        {Object.keys(users).length===0?<p style={{color:T.dim,textAlign:"center",padding:24}}>Aucun utilisateur inscrit.</p>:
-          Object.entries(users).map(([email,u])=>(
-            <div key={email} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",background:T.input,borderRadius:T.rs,border:`1px solid ${T.border}`,gap:10}}>
+        {users.length===0?<p style={{color:T.dim,textAlign:"center",padding:24}}>Aucun utilisateur inscrit.</p>:
+          users.map(u=>(
+            <div key={u.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",background:T.input,borderRadius:T.rs,border:`1px solid ${T.border}`,gap:10}}>
               <div style={{minWidth:0,flex:1}}>
                 <div style={{fontSize:14,fontWeight:700,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span>{u.name}</span>
-                  {isAdmin({email})&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:10,background:T.purpleBg,color:T.purple,fontWeight:800,letterSpacing:.5}}>ADMIN</span>}
+                  {isAdmin(u)&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:10,background:T.purpleBg,color:T.purple,fontWeight:800,letterSpacing:.5}}>ADMIN</span>}
                 </div>
-                <div style={{fontSize:12,color:T.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{email} · Inscrit le {u.joined?new Date(u.joined).toLocaleDateString("fr-FR"):"—"}</div>
+                <div style={{fontSize:12,color:T.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.email} · Inscrit le {u.created_at?new Date(u.created_at).toLocaleDateString("fr-FR"):"—"}</div>
               </div>
-              {!isAdmin({email})&&email!==currentUser?.email&&<button onClick={()=>deleteUser(email)} style={delBtn}>🗑 Supprimer</button>}
+              {!isAdmin(u)&&u.id!==currentUser?.id&&<button onClick={()=>deleteUser(u)} style={delBtn}>🗑 Supprimer</button>}
             </div>
           ))}
       </div>}
 
       {tab==="comments"&&<div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"58vh",overflowY:"auto"}}>
         {comments.length===0?<p style={{color:T.dim,textAlign:"center",padding:24}}>Aucun commentaire à modérer.</p>:
-          comments.map((c,i)=>(
-            <div key={i} style={{padding:"10px 14px",background:T.input,borderRadius:T.rs,border:`1px solid ${T.border}`}}>
+          comments.map(c=>(
+            <div key={c.id} style={{padding:"10px 14px",background:T.input,borderRadius:T.rs,border:`1px solid ${T.border}`}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:8,flexWrap:"wrap"}}>
                 <span style={{fontSize:13,fontWeight:700}}>{c.author} <span style={{color:T.dim,fontWeight:500,fontSize:11}}>({c.email})</span></span>
                 <span style={{fontSize:11,color:T.dim}}>{c.date?new Date(c.date).toLocaleDateString("fr-FR"):""}</span>
@@ -482,7 +521,7 @@ function AdminPanel({allSeqs,userSeqs,onDeleteSeq,onApproveSeq,currentUser}){
               <p style={{fontSize:13,color:T.sec,marginBottom:8,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{c.text}</p>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                 <span style={{fontSize:11,color:T.dim,fontStyle:"italic"}}>Sur : {c.seqTitre}</span>
-                <button onClick={()=>deleteComment(c.seqId,c.idx)} style={delBtn}>🗑 Supprimer</button>
+                <button onClick={()=>deleteComment(c.id)} style={delBtn}>🗑 Supprimer</button>
               </div>
             </div>
           ))}
@@ -513,23 +552,45 @@ export default function App(){
   const[showPublish,sPub]=useState(false);const[userSeqs,sUS]=useState([]);
   const[showAdmin,sAdmin]=useState(false);
 
-  useEffect(()=>{(async()=>{
-    const u=await ST.get("tc-current-user");
-    if(u){const role=isAdmin(u)?"admin":(u.role||"user");sUser({...u,role});}
-    const us=await ST.gS("tc-user-seqs")||[];sUS(us);
-  })()},[]);
+  const[pwOpen,sPw]=useState(false);
 
-  const login=async u=>{
-    const users=await ST.gS("tc-users")||{};
-    const role=isAdmin(u)?"admin":(users[u.email]?.role||"user");
-    const withRole={...u,role};
-    sUser(withRole);
-    await ST.set("tc-current-user",withRole);
+  const loadSeqs=async()=>{
+    const{data}=await supabase.from("sequences").select("id,author_id,data,status,created_at").order("created_at");
+    sUS((data||[]).map(seqFromRow));
   };
-  const logout=async()=>{sUser(null);await ST.set("tc-current-user",null);};
-  const publishSeq=async seq=>{const n=[...userSeqs,{...seq,status:"pending",publishedAt:Date.now()}];sUS(n);await ST.sS("tc-user-seqs",n);};
-  const deleteUserSeq=async id=>{const n=userSeqs.filter(s=>s.id!==id);sUS(n);await ST.sS("tc-user-seqs",n);};
-  const approveSeq=async id=>{const n=userSeqs.map(s=>s.id===id?{...s,status:"approved",approvedAt:Date.now()}:s);sUS(n);await ST.sS("tc-user-seqs",n);};
+  const loadProfile=async session=>{
+    if(!session){sUser(null);return;}
+    const{data}=await supabase.from("profiles").select("id,email,name,role").eq("id",session.user.id).single();
+    sUser(data||{id:session.user.id,email:session.user.email,name:session.user.user_metadata?.name||session.user.email,role:"user"});
+  };
+  useEffect(()=>{
+    supabase.auth.getSession().then(({data})=>loadProfile(data.session));
+    const{data:sub}=supabase.auth.onAuthStateChange((event,session)=>{
+      if(event==="PASSWORD_RECOVERY")sPw(true);
+      // différé : pas d'appel Supabase directement dans le callback d'auth
+      setTimeout(()=>{loadProfile(session);},0);
+    });
+    return()=>sub.subscription.unsubscribe();
+  },[]);
+  useEffect(()=>{loadSeqs()},[user?.id]);
+
+  const logout=async()=>{await supabase.auth.signOut();sUser(null);};
+  const publishSeq=async seq=>{
+    if(!user)return;
+    const{error}=await supabase.from("sequences").insert({author_id:user.id,data:seq,status:"pending"});
+    if(error){alert("Impossible d'envoyer la séquence : "+error.message);return;}
+    loadSeqs();
+  };
+  const deleteUserSeq=async id=>{
+    const{error}=await supabase.from("sequences").delete().eq("id",id);
+    if(error){alert("Erreur : "+error.message);return;}
+    sUS(us=>us.filter(s=>s.id!==id));
+  };
+  const approveSeq=async id=>{
+    const{error}=await supabase.from("sequences").update({status:"approved",approved_at:new Date().toISOString()}).eq("id",id);
+    if(error){alert("Erreur : "+error.message);return;}
+    sUS(us=>us.map(s=>s.id===id?{...s,status:"approved"}:s));
+  };
 
   const approvedUserSeqs=userSeqs.filter(s=>!s.status||s.status==="approved");
   const allSeqs=[...SEQUENCES,...approvedUserSeqs];
@@ -626,7 +687,8 @@ export default function App(){
         <p style={{fontSize:12,color:T.dim}}>Créé par H. Bounedjar</p>
       </footer>
 
-      <AuthModal open={authOpen} onClose={()=>sAuth(false)} onLogin={login}/>
+      <AuthModal open={authOpen} onClose={()=>sAuth(false)}/>
+      <NewPasswordModal open={pwOpen} onClose={()=>sPw(false)}/>
       <Modal open={showAI} onClose={()=>sAI(false)} title="🤖 TechnoBot" wide><div style={{height:"60vh"}}><AIChat/></div></Modal>
       <Modal open={showPublish} onClose={()=>sPub(false)} title="📦 Publier une séquence" wide><PublishForm onClose={()=>sPub(false)} onPublish={publishSeq} user={user}/></Modal>
       <Modal open={showAdmin&&isAdmin(user)} onClose={()=>sAdmin(false)} title="🛠 Administration" wide><AdminPanel allSeqs={allSeqs} userSeqs={userSeqs} onDeleteSeq={deleteUserSeq} onApproveSeq={approveSeq} currentUser={user}/></Modal>
