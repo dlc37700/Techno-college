@@ -29,7 +29,13 @@ export default async function handler(req, res) {
     }));
     const body = {
       contents,
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
+      generationConfig: {
+        // Les modèles 2.5 "réfléchissent" avant de répondre et cette réflexion consomme
+        // maxOutputTokens : sans budget de réflexion à 0, les réponses sont coupées net.
+        maxOutputTokens: Math.min(Math.max(maxTokens, 3000), 8192),
+        temperature: 0.7,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
     };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
 
